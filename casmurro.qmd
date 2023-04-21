@@ -1,0 +1,339 @@
+---
+title: "O doce nome de Capitu"
+format:
+  html:
+    css: www/styles.css
+execute:
+  echo: false
+  warning: false
+  error: false
+---
+
+<!-- Links the page to the chosen (Google Fonts) -->
+<head>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+</head>
+
+```{r initial-setup}
+
+# 0. Initial setup ##########
+## Loads packages
+library(dplyr)
+library(ggplot2)
+library(ggiraph)
+library(ggpath)
+library(glue)
+library(ggtext)
+library(htmltools)
+library(purrr)
+library(readr)
+library(stringr)
+library(tm)
+library(tidyr)
+library(tidytext)
+
+## "Hacking" ggiraph to add an interactive version of ggpath::geom_from_path
+geom_from_path_interactive <- function(...)
+{ggiraph:::layer_interactive(ggpath::geom_from_path, ...)}
+
+GeomInteractiveFromPath <- ggplot2::ggproto(
+  "GeomInteractiveFromPath",
+  GeomFromPath,
+  default_aes = ggiraph:::add_default_interactive_aes(GeomFromPath),
+  parameters = ggiraph:::interactive_geom_parameters,
+  draw_key = ggiraph:::interactive_geom_draw_key,
+  draw_panel = function(data, panel_params, coord, ..., .ipar = ggiraph:::IPAR_NAMES) {
+    zz <- GeomFromPath$draw_panel(data, panel_params, coord, ...)
+    coords <- coord$transform(data, panel_params)
+    ggiraph:::add_interactive_attrs(zz, coords, ipar = .ipar)
+  }
+)
+
+## Loads the text of the novel
+## Data downloaded from the "Machado de Assis" dataset on Kaggle, composed by Luiz Amaral
+## Link: https://www.kaggle.com/datasets/luxedo/machado-de-assis
+domCasmurro <- readr::read_delim(
+  file = "domCasmurro.txt",
+  delim = "#",
+  quote = "#",
+  col_names = "text"
+)
+
+```
+
+
+```{r data-handling}
+
+# 1. Data handling ##########
+## Lists the characters of interest, their abbreviations, and their colors
+chars <- c("capitu", "josé dias", "escobar", "bentinho")
+chars_abbrv <- c("cpt", "jds", "ecb", "btn")
+chars_colors <- c("#FA1B00", "#B8B800", "#0047EA", "#00B748")
+names(chars_colors) <- chars_abbrv
+
+## Adds the number of chapter
+df <- domCasmurro |> 
+  dplyr::slice(-1, -n()) |> 
+  dplyr::mutate(chp = stringr::str_detect(text, stringr::regex("^CAPÍTULO")),
+                chp = as.numeric(chp),
+                chp = cumsum(chp))
+
+## Collapses all text for each chapter into a single line
+df <- df |> 
+  dplyr::group_by(chp) |> 
+  dplyr::slice(-(1:2)) |> 
+  dplyr::summarise(text = paste0(text, collapse = " ")) |> 
+  dplyr::ungroup()
+
+## Cleans the text of some artifacts that confuse the unnest_tokens function
+df <- df |> 
+  dplyr::mutate(text = stringr::str_replace_all(
+    text,
+    c("D\\." = "Dona",
+      "Sr\\." = "Senhor",
+      "\\;" = "\\.")
+  ),
+  text = stringr::str_remove_all(text, "—")
+  )
+
+## Separates the text of each chapter by sentence
+df <- df |> 
+  tidytext::unnest_tokens(output = "sentences",
+                          input = "text",
+                          token = "sentences") |> 
+  dplyr::mutate(line = 1:n())
+
+## Creates a list of anonymous functions for detecting characters of interest
+detect_fun <- chars |> 
+  purrr::map(function(string) {
+    as.formula(paste0("~stringr::str_detect(.,'", string ,"')"))
+  })
+names(detect_fun) <- chars_abbrv
+
+## Creates dummy variables to register ocurrence of the characters of interest
+df <- df |> 
+  dplyr::mutate(across(.cols = "sentences", .fns = detect_fun))
+
+## Stacks the dummies into one column
+df <- df |> 
+  dplyr::select(-chp) |> 
+  tidyr::pivot_longer(cols = starts_with("sentences_"),
+                      names_to = "characters",
+                      values_to = "occurs")
+
+## Keeps only sentences in which one of the characters is named
+df <- df |> dplyr::filter(occurs)
+
+## Converts the "characters" column into a factor
+df <- df |> 
+  dplyr::mutate(characters = stringr::str_remove(characters, "sentences_"),
+                characters = factor(characters, levels = chars_abbrv))
+
+## Arranges the data by character and line and defines their coordinates
+df <- df |> 
+  dplyr::select(-occurs) |> 
+  dplyr::arrange(characters, line) |> 
+  dplyr::mutate(x = rep(1:20, 33)[1:n()],
+                y = ((row_number() - 1) %/% 20) + 1)
+
+## Highlights the names of the characters in the sentences
+spotlight <- glue::glue("<strong style='color:{chars_colors};'>{chars}</strong>")
+names(spotlight) <- chars
+df <- df |> 
+  dplyr::mutate(sentences = stringr::str_replace_all(sentences, spotlight))
+
+## Defines coordinates of the arcs
+x0 <- 10.5
+y0 <- -12
+r <- 10
+points <- 20
+arcs <- dplyr::tibble(
+  phi = c(seq(0, pi/2, length.out = points),
+          seq(pi/2, pi, length.out = points),
+          seq(pi, 3*pi/2, length.out = points),
+          seq(3*pi/2, 2*pi, length.out = points)),
+  dx = r*cos(phi),
+  dy = r*sin(phi),
+  x = dx + x0,
+  y = dy + y0,
+  characters = c(rep("ecb", points),
+                 rep("jds", points),
+                 rep("cpt", points),
+                 rep("btn", points))
+) |> 
+  dplyr::add_row(x = x0, y = y0,
+                 characters = chars_abbrv) |> 
+  dplyr::arrange(characters, phi) |> 
+  dplyr::select(x, y, characters)
+
+## Defines coordinates of the characters names and titles
+labels <- dplyr::tibble(
+  characters = chars_abbrv,
+  names = c("Capitu",
+            "José Dias",
+            "Escobar",
+            "Bentinho"),
+  titles = c("o amor oblíquo",
+             "o agregado servil",
+             "o amigo sobranceiro",
+             "o dom casmurro")
+)
+
+## Creates paths to the images
+images <- dplyr::tibble(
+  characters = c(chars_abbrv, "default"),
+  path = glue::glue("www/images/{characters}.png")
+)
+
+```
+
+```{r description}
+
+# 2. Plot description ##########
+## Places a line that separates title and description
+hr()
+
+## Places the subtitle
+div(
+  
+  span(
+    id='sub-top',
+    "Dom Casmurro, livro do grande Machado de Assis, retrata a trajetória de Bentinho: de jovem tolo e apaixonado a velho amargo e solitário."
+  ),
+  br(),br(),
+  
+  span(
+    id='sub-bottom',
+    "Essa página mostra sentenças nas quais as quatro personagens mais frequentemente citadas por nome no livro aparecem. Tais personagens são ",
+    span(style='color:#FA1B00;', "Capitu,"),
+    span(style='color:#B8B800;', "José Dias,"),
+    span(style='color:#0047EA;', "Escobar,"),
+    " e o próprio ",
+    span(style='color:#00B748;', "Bentinho."),
+    br(),br(),
+    
+    strong("O disco"),
+    " abaixo permite ",
+    strong("destacar os cubos"),
+    " que indicam a quantidade de sentenças nas quais uma personagem foi citada. Ao passar o ",
+    strong("mouse sobre"),
+    " cada ",
+    strong("cubo"),
+    ", uma sentença é exibida."
+  ),
+  
+)
+
+## Places links to my social media profiles
+div(
+  id='author',
+  
+  a(
+    href='https://twitter.com/icarobsc',
+    target='_blank',
+    span(class='glyphs', id='twt'),
+    "@IcaroBSC"
+  ),
+  a(
+    href='https://github.com/IcaroBernardes',
+    target='_blank',
+    span(class='glyphs', id='ghb'),
+    "@IcaroBernardes"
+  ),
+  a(
+    href='https://www.linkedin.com/in/icarobsc/',
+    target='_blank',
+    span(class='glyphs', id='lkd'),
+    "@icarobsc"
+  )
+  
+)
+
+
+```
+
+
+```{r plot-production}
+
+# 3. Plot production ##########
+## Defines the background color
+bglight <- "#4D3A22"
+bgdark <- "#332717"
+
+## Creates the static plot
+static <- df |> 
+  ggplot() +
+  
+  ### Places the characters names and titles
+  geom_text_interactive(
+    aes(x = 0, y = -28, label = names, data_id = characters),
+    color = "white", alpha = 0, family = "Raleway", 
+    hjust = 0, size = 6, data = labels
+  ) +
+  geom_text_interactive(
+    aes(x = 20, y = -25, label = titles, data_id = characters),
+    color = "white", alpha = 0, family = "Raleway", 
+    hjust = 1, size = 3, fontface = "italic", data = labels
+  ) +
+  
+  ### Places the arcs
+  geom_polygon_interactive(
+    aes(x = x, y = y, data_id = characters, fill = characters),
+    color = bglight, linewidth = 1.5, data = arcs
+  ) +
+  
+  ### Places a point over the arcs
+  ggplot2::annotate("point", x = x0, y = y0, shape = 21, stroke = 1.5,
+                    fill = bgdark, color = bglight, size = 35) +
+  
+  ### Places the waffle tiles
+  ggiraph::geom_tile_interactive(
+    aes(x = x, y = y, data_id = characters, fill = characters, tooltip = sentences),
+    color = bglight, width = 0.5, height = 0.5
+  ) +
+  
+  ### Places the images
+  geom_from_path_interactive(
+    aes(x = x0, y = y0, path = path, data_id = characters),
+    width = 0.62, height = 0.62, data = images
+  ) +
+  
+  ### Guarantees that the shapes proportions are not distorted
+  coord_equal() +
+  
+  ### Reverts the order of the y-axis
+  scale_y_reverse() +
+  
+  ### Defines the colors as function of the characters
+  scale_fill_discrete(type = chars_colors) +
+  
+  ### Eliminates and customizes plot elements
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = bglight, color = bglight),
+    legend.position = "none"
+  )
+
+## Creates the interactive plot
+ggiraph::girafe(
+  ggobj = static,
+  width_svg = 3,
+  bg = bglight,
+  options = list(
+    ggiraph::opts_hover_inv(ggiraph::girafe_css(
+      css = glue::glue("fill:{bgdark};"),
+      text = "opacity:0;",
+      image = "opacity:0;"
+    )),
+    ggiraph::opts_hover(ggiraph::girafe_css(
+      css = glue::glue("stroke:{bglight};"),
+      text = "opacity:1;fill:white;stroke:none;",
+      image = "opacity:1;"
+    )),
+    ggiraph::opts_tooltip(css = glue::glue("background:{bgdark};color:white;"))
+  )
+)
+
+```
